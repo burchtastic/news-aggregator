@@ -1,0 +1,15 @@
+run = "bash start.sh"
+entrypoint = "start.sh"
+
+[nix]
+channel = "stable-24_05"
+
+[env]
+PORT = "8000"
+
+[deployment]
+run = ["sh", "-c", "bash start.sh"]
+
+[[ports]]
+localPort = 8000
+externalPort = 80
