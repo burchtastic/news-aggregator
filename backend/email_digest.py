@@ -1,11 +1,18 @@
-"""Daily email digest sender via Gmail SMTP."""
+"""Daily email digest sender via Resend (Replit's official email partner).
+
+Required secret in Replit:
+  RESEND_API_KEY  — from resend.com (free tier, no domain setup needed for testing)
+
+Optional secrets:
+  EMAIL_RECIPIENT — override the address stored in user preferences
+  EMAIL_FROM      — sender address (default: onboarding@resend.dev works without a domain)
+"""
 import logging
 import os
-import smtplib
 from collections import defaultdict
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+
+import resend
 
 from . import database as db
 
@@ -31,7 +38,6 @@ SENTIMENT_EMOJI = {
 
 
 def _build_html(articles: list, generated_at: str) -> str:
-    # Group by first tag
     by_topic: dict[str, list] = defaultdict(list)
     untagged = []
     for a in articles:
@@ -41,7 +47,6 @@ def _build_html(articles: list, generated_at: str) -> str:
         else:
             untagged.append(a)
 
-    # Build topic sections in preferred order
     sections_html = ""
     seen_ids = set()
 
@@ -53,7 +58,7 @@ def _build_html(articles: list, generated_at: str) -> str:
             seen_ids.add(a["id"])
 
         articles_html = ""
-        for a in topic_articles[:8]:  # max 8 per topic
+        for a in topic_articles[:8]:
             sentiment = a.get("sentiment", "neutral")
             emoji = SENTIMENT_EMOJI.get(sentiment, "🔵")
             score = a.get("score", 0)
@@ -88,7 +93,6 @@ def _build_html(articles: list, generated_at: str) -> str:
           {articles_html}
         </div>"""
 
-    # Any remaining (untagged or extra)
     remaining = [a for a in untagged if a["id"] not in seen_ids]
     if remaining:
         articles_html = ""
@@ -117,8 +121,6 @@ def _build_html(articles: list, generated_at: str) -> str:
 <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
              background:#f3f4f6;">
   <div style="max-width:680px;margin:0 auto;padding:24px 16px;">
-
-    <!-- Header -->
     <div style="background:#1e3a8a;color:white;padding:24px;border-radius:8px;margin-bottom:24px;
                 text-align:center;">
       <h1 style="margin:0 0 4px;font-size:24px;">📰 Daily News Digest</h1>
@@ -126,14 +128,10 @@ def _build_html(articles: list, generated_at: str) -> str:
         {generated_at} &nbsp;·&nbsp; {total} articles curated for you
       </p>
     </div>
-
-    <!-- Content -->
     {sections_html if sections_html else
       '<p style="text-align:center;color:#6b7280;">No high-scoring articles to report today.</p>'}
-
-    <!-- Footer -->
     <div style="text-align:center;padding:16px;color:#9ca3af;font-size:12px;border-top:1px solid #e5e7eb;">
-      News Aggregator · Annapolis, MD · Unsubscribe by updating your preferences
+      News Aggregator · Annapolis, MD
     </div>
   </div>
 </body>
@@ -154,30 +152,28 @@ def build_digest_data(hours: int = 24) -> dict:
 
 
 def send_digest():
-    """Send the nightly email digest via Gmail SMTP."""
-    gmail_user = os.getenv("GMAIL_USER", "")
-    gmail_password = os.getenv("GMAIL_APP_PASSWORD", "")
+    """Send the nightly digest via Resend (Replit's official email partner)."""
+    api_key = os.getenv("RESEND_API_KEY", "")
+    if not api_key:
+        logger.error("RESEND_API_KEY not set — skipping digest send")
+        return
+
     prefs = db.get_preferences()
     recipient = prefs.get("email_recipient") or os.getenv("EMAIL_RECIPIENT", "")
-
-    if not gmail_user or not gmail_password:
-        logger.error("Gmail credentials not configured; skipping digest send")
-        return
     if not recipient:
-        logger.error("No recipient email configured; skipping digest send")
+        logger.error("No EMAIL_RECIPIENT configured — skipping digest send")
         return
+
+    # onboarding@resend.dev works without a verified domain (sends to your own address only)
+    from_addr = os.getenv("EMAIL_FROM", "News Aggregator <onboarding@resend.dev>")
 
     digest = build_digest_data()
     if digest["article_count"] == 0:
-        logger.info("No articles for digest today; skipping send")
+        logger.info("No articles for digest today — skipping send")
         return
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"📰 Daily News Digest — {digest['generated_at']}"
-    msg["From"] = gmail_user
-    msg["To"] = recipient
+    resend.api_key = api_key
 
-    # Plain-text fallback
     plain = f"Daily News Digest — {digest['generated_at']}\n\n"
     for a in digest["articles"][:20]:
         plain += f"{a['title']}\n{a['source']} | {a.get('url', '')}\n"
@@ -185,14 +181,17 @@ def send_digest():
             plain += f"{a['summary']}\n"
         plain += "\n"
 
-    msg.attach(MIMEText(plain, "plain"))
-    msg.attach(MIMEText(digest["html"], "html"))
-
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(gmail_user, gmail_password)
-            server.sendmail(gmail_user, recipient, msg.as_string())
-        logger.info("Digest sent to %s (%d articles)", recipient, digest["article_count"])
+        response = resend.Emails.send({
+            "from": from_addr,
+            "to": [recipient],
+            "subject": f"📰 Daily News Digest — {digest['generated_at']}",
+            "html": digest["html"],
+            "text": plain,
+        })
+        logger.info(
+            "Digest sent to %s via Resend (id=%s, %d articles)",
+            recipient, response.get("id"), digest["article_count"],
+        )
     except Exception as exc:
-        logger.error("Failed to send digest: %s", exc)
+        logger.error("Failed to send digest via Resend: %s", exc)
