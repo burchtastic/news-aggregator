@@ -9,6 +9,7 @@ import requests
 
 from . import database as db
 from .claude_api import analyze_article
+from .twitter_fetcher import fetch_twitter_accounts
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,9 @@ def run_fetch_all() -> dict:
 
     for source in sources:
         total_new += fetch_feed(source)
+
+    # Fetch Twitter/X accounts (runs only if TWITTER_BEARER_TOKEN is set)
+    total_new += fetch_twitter_accounts()
 
     # Analyze unprocessed articles
     analyzed = analyze_pending_articles()
